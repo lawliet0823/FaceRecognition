@@ -1,12 +1,11 @@
-
 #include <iostream>
 #include <fstream>
 #include <stdio.h>
 #include <stdlib.h>
-#include <opencv2\opencv.hpp>
-#include <opencv2\objdetect\objdetect.hpp>
-#include <opencv2\highgui\highgui.hpp>
-#include <opencv2\imgproc\imgproc.hpp>
+#include <map>
+#include <opencv\cv.hpp>
+#include <opencv\highgui.h>
+#include <opencv\cxcore.h>
 
 #include <flandmark_detector.h>
 #include <FaceAlignment.h>
@@ -14,32 +13,42 @@
 #include <histogram.hpp>
 #include <svm.h>
 
-#include <dirent.h>
+#include <pca.h>
+#include <random>
+
 
 using namespace cv;
 using namespace lbp;
 using namespace std;
 
 #define Malloc(type,n) (type *)malloc((n)*sizeof(type))
+#define min(a,b) (a) > (b) ? b : a
 
 // Face model
-const String face_cascade_name = "haarcascade_frontalface_alt.xml";
-FLANDMARK_Model * model = flandmark_init("flandmark_model.dat");
+const String face_cascade_name = "haarcascade_frontalface_alt_tree.xml";
+FLANDMARK_Model *landmarkModel = flandmark_init("flandmark_model.dat");
+
+map<string, int> readFile(string fileName);
+Rect getCropImageBound(double center_x, double center_y, int crop_size);
+
+double getSkewness(double *landmarks);
+Mat rotateImage(Mat src, double angle);
+double *landmarkRotation(double *landmarks, double angle, double midX, double midY);
 
 // Face Recognition Function
 vector<Rect> faceDetection(Mat image);
-double* landmarkDetection(Mat image,vector<Rect> faces);
-//vector<Mat> landmarkDetection(Mat image,vector<Rect> faces);
+double* landmarkDetection(Mat image, Rect rect_face);
 Mat lbpFeature(Mat image);
 
-inline bool islegalFileName(const char* tmpName);
-inline bool isImgOutofBound(int x,int y,int bound);
+inline bool isImgOutofBound(int x, int y, int crop_size, int img_width, int img_height);
 
-int main(void){
+vector<Rect> faces;
+vector<Rect> faces_t;
 
-	map<string,int> multiImgMap;			// preserve how many pictures per person
-	map<double,string> testMapInfo;			// preserve person label
-	stringstream sfile_name;
+int main(void) {
+
+	const int feature_total_num = 3 * 7 * 16 * 59 + 1;
+	const int cell_size = 36;
 
 	// SVM Setup
 	struct svm_parameter _param;
@@ -49,7 +58,7 @@ int main(void){
 	_param.svm_type = C_SVC;
 	_param.kernel_type = LINEAR;
 	_param.degree = 3;
-	_param.gamma = 0.00055;			// 1/num_features
+	_param.gamma = 0.0001;			// 1/num_features
 	_param.coef0 = 0;
 	_param.nu = 0.5;
 	_param.cache_size = 100;
@@ -63,368 +72,445 @@ int main(void){
 	_param.weight = NULL;
 
 	// training sample number
-	_prob.l = 7292;
-	_prob.y = Malloc(double,_prob.l);
-	svm_node **node = Malloc(svm_node*,_prob.l);
+	_prob.l = 20;
+	_prob.y = Malloc(double, _prob.l);
+	svm_node **node = Malloc(svm_node*, _prob.l);
 
-	int total_num = 0;	// training total number
-	double label = 1;
+	map<string, int> trainMap;
+	map<string, int> testMap;
+	trainMap = readFile("Train.txt");
+	testMap = readFile("Test.txt");
 
-	string lineString;
-	fstream fileReader("name.txt");
-	while(getline(fileReader,lineString)){
-		istringstream isstream(lineString);
-		string name;
-		int value;
-		isstream >> name >> value;
-		multiImgMap.insert(make_pair(name,value));
+	char filename1[] = "FaceLandmarkFail.txt";
+	char filename2[] = "BoundFail.txt";
+	char outputFile[] = "negative.txt";
+	fstream fp1, fp2, nfp;
+
+
+	fp1.open(filename1, ios::out);
+	if (!fp1) {
+		cout << "Fail to open file: " << filename1 << endl;
+	}
+	fp2.open(filename2, ios::out);
+	if (!fp2) {
+		cout << "Fail to open file: " << filename2 << endl;
+	}
+	nfp.open(outputFile, ios::out);
+	if (!nfp) {
+		cout << "Fail to open file: " << outputFile << endl;
 	}
 
-	DIR *mainDir = NULL;
-	DIR *nameDir = NULL;
-	struct dirent *pent = NULL;
+	//regressor.Load("landmark_model_new.txt");
+	int parameter_choice = 1;
 
+	if (parameter_choice == 0) {
 
-	mainDir = opendir("temp");
-	if(mainDir == NULL){
-		cout << "Fail to read LFW dataset" << endl;
-		exit(3);
-	}
+		// count training number
+		int train_num_count = 0;
 
-	while(pent = readdir(mainDir)){
-		if(pent == NULL){
-			cout << "Can't find name directory" << endl;
-			exit(3);
-		}
+		map<string, int>::iterator it = trainMap.begin();
+		for (; it != trainMap.end(); it++) {
+			string file_Location = it->first;
+			int label = it->second;
+			cout << file_Location << "	" << label << endl;
+			Mat image = imread(file_Location, 0);
+			//equalizeHist(image, image);
 
-		if(islegalFileName(pent->d_name)){
-			string _temp(pent->d_name);
-			//cout << _temp << endl;
-			map<string,int>::iterator it = multiImgMap.find(_temp);
-			if(it== multiImgMap.end())
-				continue;
-			int dirImgNum = it->second;
-			if(dirImgNum>2){
-				testMapInfo.insert(make_pair(label,_temp));
-				//cout << _temp << "	" << label << endl;
+			if (image.empty()) {
+				cout << file_Location << " Image read fail" << endl;
 			}
-			++label;
-		}
-	}
-	/*
-	int count = 1;
 
-	sfile_name.str("");
-	sfile_name.clear();
-	sfile_name << "lfw" << "/" << pent->d_name;
+			int feature_index = 0;
+			svm_node *node_space = Malloc(svm_node, feature_total_num);
 
-	const string &temp = sfile_name.str();
-	const char *imagePath = temp.c_str();
-
-	nameDir = opendir(imagePath);
-	while(pent = readdir(nameDir)){
-
-	// Examine file name and control training number
-	if(islegalFileName(pent->d_name) && dirImgNum >= count){
-	if(dirImgNum>1 && dirImgNum == count)
-	break;
-	int feature_index = 0;
-	svm_node *node_space = Malloc(svm_node,1793);
-
-	sfile_name.str("");
-	sfile_name.clear();
-	sfile_name << temp << "/" << pent->d_name;
-	cout << sfile_name.str() << endl;
-	Mat image = imread(sfile_name.str(),0);
-	if(image.empty())
-	cout << "Image read fail";
-	vector<Rect> faces = faceDetection(image);
-	double *landmarks = landmarkDetection(image,faces);
-	if(faces.size() == 0 || *landmarks < 0){
-	for(int i=0;i<1792;i++){
-	node_space[i].index = i;
-	node_space[i].value = 0;
-	}
-	node_space[1792].index = -1;
-	node[total_num] = node_space;
-	_prob.y[total_num] = label;
-	++total_num;
-	++count;
-	image.release();
-	continue;
-	}
-	for(size_t landmark_element=2;landmark_element<15;landmark_element+=2){
-	Mat lbpFeatureVector;
-	Rect rect(static_cast<int>(landmarks[landmark_element]) - 20,static_cast<int>(landmarks[landmark_element+1]) - 20,40,40);
-	if(isImgOutofBound(static_cast<int>(landmarks[landmark_element]),static_cast<int>(landmarks[landmark_element+1]),250)){
-	for(int histogram_num = 0;histogram_num<256;histogram_num++){
-	node_space[feature_index].index = feature_index;
-	node_space[feature_index].value = 0;
-	feature_index++;
-	}
-	continue;
-	}
-	//cout << landmarks[landmark_element] - 20 << "	" << landmarks[landmark_element+1]-20 << endl;
-	Mat crop_ROI = image(rect);
-	Mat lbpImage = lbpFeature(crop_ROI);
-	histogram(lbpImage,lbpFeatureVector,256);
-	for(int histogram_num = 0;histogram_num<256;histogram_num++){
-	node_space[feature_index].index = feature_index;
-	node_space[feature_index].value = lbpFeatureVector.at<int>(0,histogram_num);
-	feature_index++;
-	}
-	lbpFeatureVector.release();
-	crop_ROI.release();
-	lbpImage.release();
-	}
-	node_space[1792].index = -1;
-	node[total_num] = node_space; 
-	_prob.y[total_num] = label;
-	++total_num;
-	++count;
-	image.release();
-	}
-	}
-	++label;
-	}
-	}
-
-	_prob.x = node;
-	svm_model *model = svm_train(&_prob,&_param);
-	svm_save_model("model.txt",model);
-	*/
-	svm_model *model = svm_load_model("model.txt");
-
-	double correct_num = 0;
-
-	mainDir = opendir("temp");
-
-	// LFW dataset directory - Human Name
-	while(pent = readdir(mainDir)){
-		if(pent == NULL){
-			cout << "Can't find name directory" << endl;
-			exit(3);
-		}
-
-		if(islegalFileName(pent->d_name)){
-			string humanName(pent->d_name);
-			map<string,int>::iterator it = multiImgMap.find(humanName);
-
-			// Directory has only one picture => continue
-			if(it== multiImgMap.end() || it->second == 1){
+			// Face Detection
+			faces.swap(vector<Rect>());
+			faces = faceDetection(image);
+			if (faces.size() == 0) {
+				//fp1 << file_Location << "	:face" << endl;
+				cout << "Face Detection 1 Error!!!" << endl;
+				for (int i = 0; i < feature_total_num - 1; i++) {
+					node_space[i].index = i;
+					node_space[i].value = 0;
+				}
+				node_space[feature_total_num - 1].index = -1;
+				node[train_num_count] = node_space;
+				_prob.y[train_num_count] = label;
+				++train_num_count;
 				continue;
 			}
 
-			// Record total file number in directory
-			int dirImgNum = it->second;
-			int count = 1;
+			image = image(Rect(faces.at(0).x - 20, faces.at(0).y - 20, faces.at(0).width + 40, faces.at(0).height + 40));
+			resize(image, image, Size(200, 200));
 
-			sfile_name.str("");
-			sfile_name.clear();
-			sfile_name << "temp" << "/" << pent->d_name;
-			const string &temp = sfile_name.str();
-			const char *imagePath = temp.c_str();
 
-			nameDir = opendir(imagePath);
-			while(pent = readdir(nameDir)){
+			faces_t.swap(vector<Rect>());
+			faces_t = faceDetection(image);
+			if (faces_t.size() == 0) {
+				cout << "Face Detection 2 Error!!!" << endl;
+				for (int i = 0; i < feature_total_num - 1; i++) {
+					node_space[i].index = i;
+					node_space[i].value = 0;
+				}
+				node_space[feature_total_num - 1].index = -1;
+				node[train_num_count] = node_space;
+				_prob.y[train_num_count] = label;
+				++train_num_count;
+				continue;
+			}
 
-				// Examine file name and control training number
-				if(islegalFileName(pent->d_name)){
-					//cout << dirImgNum << "	" << count << endl;
-					if(dirImgNum != count){
-						++count;
-						continue;
-					}
-					//cout << "in" << endl;
-					int feature_index = 0;
-					svm_node *test_node = Malloc(svm_node,1793);
+			double *landmarks = landmarkDetection(image, faces_t.at(0));
+			if (*landmarks < 0) {
+				cout << "landmark detection error" << endl;
+				//fp1 << file_Location << "	:mark" << endl;
+				for (int i = 0; i < feature_total_num - 1; i++) {
+					node_space[i].index = i;
+					node_space[i].value = 0;
+				}
+				node_space[feature_total_num - 1].index = -1;
+				node[train_num_count] = node_space;
+				_prob.y[train_num_count] = label;
+				++train_num_count;
+				continue;
+			}
+			else {
+				image = rotateImage(image, getSkewness(landmarks));
+				landmarks = landmarkRotation(landmarks, -getSkewness(landmarks), image.cols / 2, image.rows / 2);
+				//landmarks = landmarkRotation(landmarks, getSkewness(landmarks), image.cols, image.rows);
+				// scale image
+				for (size_t scale_num = 0; scale_num < 3; scale_num++) {
+					Mat scaleImage;
+					resize(image, scaleImage, Size(), 1 - 0.2*scale_num, 1 - 0.2*scale_num, 1);
+					// can't find faces and landmarks
 
-					sfile_name.str("");
-					sfile_name.clear();
-					sfile_name << temp << "/" << pent->d_name;
-					cout << sfile_name.str() << endl;
-					Mat image = imread(sfile_name.str(),0);
-
-					if(image.empty())
-						cout << "Image read fail";
-					vector<Rect> faces = faceDetection(image);
-					double *landmarks = landmarkDetection(image,faces);
-					if(faces.size() == 0 || *landmarks < 0){
-						for(int i=0;i<1792;i++){
-							test_node[i].index = i;
-							test_node[i].value = 0;
-						}
-						test_node[1792].index = -1;
-						double retval = svm_predict(model,test_node);
-						map<double,string>::iterator it = testMapInfo.find(retval);
-						if(it == testMapInfo.end()){
-							cout << "Find nothing" << endl;
-							break;
-						}
-						cout << it->second << endl;
-						if(strcmp(it->second.c_str(),humanName.c_str())!=0){
-							++correct_num;
-						}
-						image.release();
-						continue;
-					}
-					for(size_t landmark_element=2;landmark_element<15;landmark_element+=2){
-						Mat lbpFeatureVector;
-						Rect rect(static_cast<int>(landmarks[landmark_element]) - 20,static_cast<int>(landmarks[landmark_element+1]) - 20,40,40);
-						//cout << landmarks[landmark_element] - 20 << "	" << landmarks[landmark_element+1]-20 << endl;
-						if(isImgOutofBound(static_cast<int>(landmarks[landmark_element]),static_cast<int>(landmarks[landmark_element+1]),250)){
-							for(int histogram_num = 0;histogram_num<256;histogram_num++){
-								test_node[feature_index].index = feature_index;
-								test_node[feature_index].value = 0;
-								feature_index++;
+					for (size_t landmark_element = 2; landmark_element < 15; landmark_element += 2) {
+						// crop image is out of bound
+						if (isImgOutofBound(static_cast<int>(landmarks[landmark_element] * (1 - 0.2*scale_num)),
+							static_cast<int>(landmarks[landmark_element + 1] * (1 - 0.2*scale_num)), cell_size, scaleImage.cols, scaleImage.rows)) {
+							fp2 << file_Location << "	" << scale_num << endl;
+							for (int histogram_num = 0; histogram_num < 16 * 59; histogram_num++) {
+								node_space[feature_index].index = feature_index;
+								node_space[feature_index].value = 0;
+								++feature_index;
 							}
 							continue;
 						}
-						Mat crop_ROI = image(rect);
-						Mat lbpImage = lbpFeature(crop_ROI);
-						histogram(lbpImage,lbpFeatureVector,256);
-						for(int histogram_num = 0;histogram_num<256;histogram_num++){
-							test_node[feature_index].index = feature_index;
-							test_node[feature_index].value = lbpFeatureVector.at<int>(0,histogram_num);
-							feature_index++;
+						//cout << landmarks[landmark_element] - 20 << "	" << landmarks[landmark_element+1]-20 << endl;
+						else {
+							Mat calLBPFeature;
+
+							Rect cropRect = getCropImageBound(landmarks[landmark_element] * (1 - 0.2*scale_num),
+								landmarks[landmark_element + 1] * (1 - 0.2*scale_num), cell_size);
+							Mat crop_Img = scaleImage(cropRect);
+
+							int sample_count = 0;
+							for (size_t cell_y = 0; cell_y < cell_size; cell_y += 9) {
+								for (size_t cell_x = 0; cell_x < cell_size; cell_x += 9) {
+									Mat lbpFeatureVector;	// Feature Vector
+									Rect cellRect(cell_x, cell_y, 9, 9);
+									Mat crop_cell = crop_Img(cellRect);
+
+									Mat lbpImage = lbpFeature(crop_cell);
+									//histogram(lbpImage, lbpFeatureVector, 256);
+									uni_histogram(lbpImage, lbpFeatureVector);
+									for (int histogram_num = 0; histogram_num < 59; histogram_num++) {
+										//mat_pca.at<int>(sample_count, histogram_num) = lbpFeatureVector.at<int>(0, histogram_num);
+										//cout << lbpFeatureVector.at<int>(0, histogram_num) << "		";
+
+										node_space[feature_index].index = feature_index;
+										node_space[feature_index].value = lbpFeatureVector.at<int>(0, histogram_num);  // (Scale)
+										++feature_index;
+
+										//cout << histogram_num << "	" << lbpFeatureVector.at<int>(0, histogram_num) << endl;
+									}
+									//cout << endl;
+									//lbpFeatureVector.release();
+									//crop_cell.release();
+									//lbpImage.release();
+								}
+							}
+							/*
+							PCA pca(mat_pca, Mat(), CV_PCA_DATA_AS_ROW);
+							cout << pca.eigenvectors.size().width << "		" << pca.eigenvectors.size().height << endl;
+							for (size_t i = 0; i < pca.eigenvectors.size().width; i++) {
+							cout << pca.eigenvectors.at<float>(13, i) << "	";
+							}
+							cout << endl;
+							*/
+							//crop_Img.release();
 						}
-						lbpFeatureVector.release();
-						crop_ROI.release();
-						lbpImage.release();
+						//Rect rect(static_cast<int>(landmarks[landmark_element]) - 20, static_cast<int>(landmarks[landmark_element + 1]) - 20, 40, 40);
 					}
-					test_node[1792].index = -1;
-					double retval = svm_predict(model,test_node);
-					map<double,string>::iterator it = testMapInfo.find(retval);
-					if(it == testMapInfo.end()){
-						cout << "Find nothing" << endl;
-						break;
-					}
-					cout << it->second << endl;
-					if(strcmp(it->second.c_str(),humanName.c_str())!=0){
-						++correct_num;
-					}
-					image.release();
+					//scaleImage.release();
 				}
+				node_space[feature_total_num - 1].index = -1;
+				node[train_num_count] = node_space;
+				_prob.y[train_num_count] = label;
+				++train_num_count;
+				/*
+				for (int element = 0; element < feature_total_num; element++) {
+					nfp << node_space[element].value << "	";
+				}
+				nfp << endl;
+				*/
 			}
+			//image.release();
 		}
+		fp1.close();
+		fp2.close();
+		//nfp.close();
+		_prob.x = node;
+		svm_model *model = svm_train(&_prob, &_param);
+		svm_save_model("model.txt", model);
 	}
 
-	cout << correct_num << endl;
 
-	/*
-	Mat image = imread("AOA.png",0);
-	double *landmarks = landmarkDetection(image,faceDetection(image));
-	if(*landmarks<0)
-	cout << "fail" << endl;
-	*/
+	if (parameter_choice == 1) {
+		svm_model *model = svm_load_model("model.txt");	// load svm model
+		if (model == NULL) {
+			cout << "Can't load model" << endl;
+		}
+		cout << "finish loading" << endl;
 
-	waitKey(0);
+		double correct_num = 0;
+		int count = 1;
+		double total_num = 0;
+		map<string, int>::iterator it = testMap.begin();
+		for (; it != testMap.end(); it++) {
+			string file_Location = it->first;
+			int label = it->second;
+			cout << file_Location << "	" << label << endl;
+			Mat image = imread(file_Location, 0);
+			if (label == count) {
+				total_num++;
+				if (image.empty()) {
+					cout << "Image read fail" << endl;
+				}
+				//equalizeHist(image, image);
+
+				int feature_index = 0;
+				svm_node *node_space = Malloc(svm_node, feature_total_num);
+				faces.swap(vector<Rect>());
+				faces = faceDetection(image);
+				if (faces.size() == 0) {
+					cout << "Face Detection 1 Error!!!" << endl;
+					//fp1 << file_Location << "	:face" << endl;
+					for (int i = 0; i < feature_total_num - 1; i++) {
+						node_space[i].index = i;
+						node_space[i].value = 0;
+					}
+					node_space[feature_total_num - 1].index = -1;
+					double retval = svm_predict(model, node_space);
+					if (retval == 1) {
+						correct_num++;
+					}
+					continue;
+				}
+
+				if (faces.at(0).x - 20 < 0 || faces.at(0).y - 20 < 0 || (faces.at(0).x + faces.at(0).width) + 40 > image.cols || (faces.at(0).y + faces.at(0).height) + 40 > image.rows) {
+					cout << "Out of bound" << endl;
+					continue;
+				}
+				image = image(Rect(faces.at(0).x - 20, faces.at(0).y - 20, faces.at(0).width + 40, faces.at(0).height + 40));
+				resize(image, image, Size(200, 200));
+
+				faces_t.swap(vector<Rect>());
+				faces_t = faceDetection(image);
+				if (faces_t.size() == 0) {
+					cout << "Face Detection 2 Error!!!" << endl;
+					for (int i = 0; i < feature_total_num - 1; i++) {
+						node_space[i].index = i;
+						node_space[i].value = 0;
+					}
+					node_space[feature_total_num - 1].index = -1;
+					double retval = svm_predict(model, node_space);
+					if (retval == 1) {
+						correct_num++;
+					}
+					continue;
+				}
+
+				double *landmarks = landmarkDetection(image, faces_t[0]);
+				if (*landmarks < 0) {
+					fp1 << file_Location << "	:mark" << endl;
+					for (int i = 0; i < feature_total_num - 1; i++) {
+						node_space[i].index = i;
+						node_space[i].value = 0;
+					}
+					node_space[feature_total_num - 1].index = -1;
+					double retval = svm_predict(model, node_space);
+					if (retval == 1) {
+						correct_num++;
+					}
+					cout << "landmark detection error" << endl;
+					continue;
+				}
+				else {
+					image = rotateImage(image, getSkewness(landmarks));
+					landmarks = landmarkRotation(landmarks, -getSkewness(landmarks), image.cols / 2, image.rows / 2);
+					// scale image
+					for (size_t scale_num = 0; scale_num < 3; scale_num++) {
+						Mat scaleImage;
+						resize(image, scaleImage, Size(), 1 - 0.2*scale_num, 1 - 0.2*scale_num, 1);
+						// can't find faces and landmarks
+						for (size_t landmark_element = 2; landmark_element < 15; landmark_element += 2) {
+							// crop image is out of bound
+							if (isImgOutofBound(static_cast<int>(landmarks[landmark_element] * (1 - 0.2*scale_num)),
+								static_cast<int>(landmarks[landmark_element + 1] * (1 - 0.2*scale_num)), cell_size, scaleImage.cols, scaleImage.rows)) {
+								fp2 << file_Location << "	" << scale_num << endl;
+								for (int histogram_num = 0; histogram_num < 16 * 59; histogram_num++) {
+									node_space[feature_index].index = feature_index;
+									node_space[feature_index].value = 0;
+									++feature_index;
+								}
+								continue;
+							}
+							//cout << landmarks[landmark_element] - 20 << "	" << landmarks[landmark_element+1]-20 << endl;
+							else {
+								Rect cropRect = getCropImageBound(landmarks[landmark_element] * (1 - 0.2*scale_num),
+									landmarks[landmark_element + 1] * (1 - 0.2*scale_num), cell_size);
+								Mat crop_Img = scaleImage(cropRect);
+								for (size_t cell_y = 0; cell_y < cell_size; cell_y += 9) {
+									for (size_t cell_x = 0; cell_x < cell_size; cell_x += 9) {
+										Mat lbpFeatureVector;
+										Rect cellRect(cell_x, cell_y, 9, 9);
+										Mat crop_cell = crop_Img(cellRect);
+										Mat lbpImage = lbpFeature(crop_cell);
+										//histogram(lbpImage, lbpFeatureVector, 256);
+										uni_histogram(lbpImage, lbpFeatureVector);
+										for (int histogram_num = 0; histogram_num < 59; histogram_num++) {
+											node_space[feature_index].index = feature_index;
+											node_space[feature_index].value = lbpFeatureVector.at<int>(0, histogram_num);  // (Scale)
+											++feature_index;
+										}
+										//lbpFeatureVector.release();
+										//crop_cell.release();
+										//lbpImage.release();
+									}
+								}
+								crop_Img.release();
+							}
+							//Rect rect(static_cast<int>(landmarks[landmark_element]) - 20, static_cast<int>(landmarks[landmark_element + 1]) - 20, 40, 40);
+						}
+						//scaleImage.release();
+
+					}
+					node_space[feature_total_num - 1].index = -1;
+					double retval = svm_predict(model, node_space);
+					if (retval == 1) {
+						correct_num++;
+					}
+				}
+				//image.release();
+			}
+			else {
+				if (correct_num >= 3) {
+					cout << "Find!!!" << endl;
+					break;
+				}
+				correct_num = 0;
+				total_num = 0;
+				count++;
+				it--;
+			}
+		}
+		fp1.close();
+		fp2.close();
+		cout << correct_num << endl;
+	}
+
 	system("pause");
 	return 0;
 }
 
+map<string, int> readFile(string fileName) {
+	map<string, int> fileMap;
+	string lineString;
+	fstream fileReader(fileName);
+	while (getline(fileReader, lineString)) {
+		istringstream isstream(lineString);
+		string file_Location;
+		int label;
+		isstream >> file_Location >> label;
+		//cout << file_Location << "	" << label << endl;
+		fileMap.insert(make_pair(file_Location, label));
+	}
+	return fileMap;
+}
+
+double getSkewness(double *landmarks) {
+	double mean_x_value = (landmarks[2] + landmarks[4] + landmarks[10] + landmarks[12]) / 4.0;
+	double mean_y_value = (landmarks[3] + landmarks[5] + landmarks[11] + landmarks[13]) / 4.0;
+	double theta = atan(((landmarks[2] * landmarks[3] + landmarks[4] * landmarks[5] + landmarks[10] * landmarks[11] + landmarks[12] * landmarks[13]) - 4 * mean_x_value*mean_y_value)
+		/ (pow(landmarks[2], 2) + pow(landmarks[4], 2) + pow(landmarks[10], 2) + pow(landmarks[12], 2) - 4 * pow(mean_x_value, 2)));
+	return theta * 180 / 3.1415926;
+}
+
+Mat rotateImage(Mat src, double angle) {
+	Mat dst;
+	Point2f pt(src.cols / 2, src.rows / 2);
+	Mat r = getRotationMatrix2D(pt, angle, 1.0);
+	warpAffine(src, dst, r, Size(src.cols, src.rows));
+	return dst;
+}
+
+double *landmarkRotation(double *landmarks, double angle, double midX, double midY) {
+	float s = sin(angle*3.1415926 / 180);
+	float c = cos(angle*3.1415926 / 180);
+	double *returnLandmarks = new double[16];
+	for (size_t i = 0; i < 15; i += 2) {
+		float x = 0;
+		float y = 0;
+		x = landmarks[i] - midX;
+		y = landmarks[i + 1] - midY;
+		float xnew = x*c - y*s;
+		float ynew = x*s + y*c;
+		x = xnew + midX;
+		y = ynew + midY;
+		returnLandmarks[i] = x;
+		returnLandmarks[i + 1] = y;
+	}
+	return returnLandmarks;
+}
+
+Rect getCropImageBound(double center_x, double center_y, int crop_size) {
+	Rect rect(static_cast<int>(center_x) - crop_size / 2, static_cast<int>(center_y) - crop_size / 2, crop_size, crop_size);
+	return rect;
+}
+
 // Face Detection: return face bound
-vector<Rect> faceDetection(Mat image){
+vector<Rect> faceDetection(Mat image) {
 
 	CascadeClassifier face_cascade;
 	vector<Rect> faces;
 
-	if(!face_cascade.load(face_cascade_name)){
+	if (!face_cascade.load(face_cascade_name)) {
 		printf("Error Loading");
 	}
 
-	face_cascade.detectMultiScale(image,faces, 1.1, 2, 0|CV_HAAR_SCALE_IMAGE, Size(30, 30) );
-	/*
-	Point leftUpCorner(faces[0].x,faces[0].y);
-	Point rightDownCorner(faces[0].x+faces[0].width,faces[0].y+faces[0].height);
-	rectangle(image,leftUpCorner,rightDownCorner,Scalar(255,0,255),4,8,0);
-	imshow("Hello",image);
-	*/
+	face_cascade.detectMultiScale(image, faces, 1.1, 2, 0 | CV_HAAR_SCALE_IMAGE, cvSize(90, 90));
 	return faces;
 }
 
 // flandmark version
-double* landmarkDetection(Mat image,vector<Rect> faces){
+double* landmarkDetection(Mat image, Rect rect_face) {
 	IplImage *img_grayscale = &IplImage(image);
-	//IplImage *img_grayscale = cvCreateImage(cvSize(i_image->width, i_image->height), IPL_DEPTH_8U, 1);
-	//cvCvtColor(i_image,img_grayscale,CV_BGR2GRAY);
-	double *landmarks = (double*)malloc(2*model->data.options.M*sizeof(double));
-	for(size_t faces_num = 0;faces_num<faces.size();faces_num++){
-		int bbox[] = {faces[faces_num].x,faces[faces_num].y,faces[faces_num].x+faces[faces_num].width,faces[faces_num].y+faces[faces_num].height};
-		flandmark_detect(img_grayscale,bbox,model,landmarks);
-		//cvRectangle(i_image, cvPoint(bbox[0], bbox[1]), cvPoint(bbox[2], bbox[3]), CV_RGB(255,0,0) );
-		//cvRectangle(i_image, cvPoint(model->bb[0], model->bb[1]), cvPoint(model->bb[2], model->bb[3]), CV_RGB(0,0,255) );
-		//cvCircle(img_grayscale, cvPoint((int)landmarks[0], (int)landmarks[1]), 3, CV_RGB(0, 0,255), CV_FILLED);
-		/*
-		for (int i = 2; i < 2*model->data.options.M; i += 2)
-		{
-		cvCircle(img_grayscale, cvPoint(int(landmarks[i]), int(landmarks[i+1])), 3, CV_RGB(255,0,0), CV_FILLED);
-		}
-		*/
-	}
-	//cvShowImage("Hello",img_grayscale);
+	double *landmarks = (double*)malloc(2 * landmarkModel->data.options.M * sizeof(double));
+	int bbox[] = { rect_face.x,rect_face.y,rect_face.x + rect_face.width,rect_face.y + rect_face.height };
+	flandmark_detect(img_grayscale, bbox, landmarkModel, landmarks);
 	return landmarks;
 }
 
-/*
-vector<Mat> landmarkDetection(Mat image,vector<Rect> faces){
-
-// Face Landmark detection pre-setup
-//ShapeRegressor regressor;
-//regressor.Load("model.txt");
-vector<BoundingBox> test_bounding_box;
-vector<Mat> landmark;
-
-for(size_t i=0;i<faces.size();i++){
-// Face Detection visualization
-
-Point leftUpCorner(faces[i].x,faces[i].y);
-Point rightDownCorner(faces[i].x+faces[i].width,faces[i].y+faces[i].height);
-rectangle(image,leftUpCorner,rightDownCorner,Scalar(255,0,255),4,8,0);
-
-
-// Face Detection Bound
-BoundingBox temp;
-temp.start_x = faces[i].x;
-temp.start_y = faces[i].y;
-temp.width = faces[i].width;
-temp.height = faces[i].height;
-temp.centroid_x = faces[i].x + faces[i].width/2;
-temp.centroid_y = faces[i].y + faces[i].height/2;
-test_bounding_box.push_back(temp);
-
-Mat_<int> current_shape = regressor.Predict(image,test_bounding_box[i],20);
-landmark.push_back(current_shape);
-// Face image landmark visualization
-
-for(int j = 0;j < 29;j++){
-cout << current_shape(j,0) << "		" << current_shape(j,1) << endl;
-circle(image,Point2d(current_shape(j,0),current_shape(j,1)),3,Scalar(255,0,0),-1,8,0);
-}
-imshow("Face",image);
-}
-return landmark;
-//imshow(window_name,image);
-}
-*/
-Mat lbpFeature(Mat image){
-	Mat dst = image;
-	//GaussianBlur(image,dst,Size(7,7),5,3,BORDER_CONSTANT);
-	Mat lbpImage;
-	ELBP(dst,lbpImage,1,8);
+// get feature lbp feature
+Mat lbpFeature(Mat image) {
+	Mat dst;
+	GaussianBlur(image, dst, Size(5, 5), 5, 3, BORDER_CONSTANT);
+	Mat lbpImage = ELBP(dst, 2, 8);
 	return lbpImage;
 }
 
-// Examine directory file not inlcude . ..
-inline bool islegalFileName(const char* tmpName){
-	if(strcmp(tmpName,".")!=0 && strcmp(tmpName,"..")!=0)
-		return true;
-	else
-		return false;
-}
-
-inline bool isImgOutofBound(int x,int y,int bound){
-	if(x-20<0 || x+40>bound || y-20<0 || y+40 >bound)
+inline bool isImgOutofBound(int x, int y, int crop_size, int img_width, int img_height) {
+	if (x - crop_size / 2 < 0 || x + crop_size / 2 > img_width || y - crop_size / 2 < 0 || y + crop_size / 2 > img_height)
 		return true;
 	else
 		return false;

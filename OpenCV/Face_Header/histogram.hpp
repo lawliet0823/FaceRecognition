@@ -17,6 +17,9 @@ template <typename _Tp>
 void histogram_(const Mat& src, Mat& hist, int numPatterns);
 
 template <typename _Tp>
+void uni_histogram_(const Mat& src, Mat& hist);
+
+template <typename _Tp>
 double chi_square_(const Mat& histogram0, const Mat& histogram1);
 
 // non-templated functions
@@ -25,6 +28,7 @@ void spatial_histogram(const Mat& src, Mat& spatialhist, int numPatterns, const 
 // wrapper functions
 void spatial_histogram(const Mat& src, Mat& spatialhist, int numPatterns, int gridx=8, int gridy=8, int overlap=0);
 void histogram(const Mat& src, Mat& hist, int numPatterns);
+void uni_histogram(const Mat& src, Mat& hist);
 double chi_square(const Mat& histogram0, const Mat& histogram1);
 
 // Mat return type functions
